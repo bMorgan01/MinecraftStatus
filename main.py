@@ -207,7 +207,7 @@ class Other(commands.Cog):
         if mc is None:
             await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
-            await safeSend("I last queried " + ip + " at " + str(last), ctx=ctx)
+            await safeSend("I last queried " + ip + " at " + str(last) + " UTC", ctx=ctx)
 
 
 async def setAnn(ctx: discord.ext.commands.context.Context, ann: bool, cid: Union[int, None] = None):
