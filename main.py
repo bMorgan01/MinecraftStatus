@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import socket
 from datetime import datetime
 from typing import Union, List
 import mysql.connector
@@ -45,9 +46,8 @@ async def on_command_error(ctx: discord.ext.commands.context.Context, error: dis
         await safeSend("Command \"" + ctx.message.content.split()[0] + "\" does not exist.", ctx=ctx)
     elif isinstance(error, discord.ext.commands.MissingPermissions):
         await safeSend("You are missing " + ", ".join(error.missing_perms) + " permission(s) to run this command.", ctx=ctx)
-    elif isinstance(error, discord.ext.commands.CommandInvokeError):
-        print(error.original.__class__.__name__)
-        await log(ctx, "Query failed, server down?")
+    elif isinstance(error, discord.ext.commands.CommandInvokeError) and error.original.__class__.__name__ == "gaierror":
+        await log(ctx, "Could not connect, server down?")
     else:
         raise error
 
@@ -448,7 +448,7 @@ async def status_task(sid: int):
                 print(currServ.name, "Timeout, server lagging?")
                 players = -1
 
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, socket.gaierror):
                 print(currServ.name, "Cannot connect to server, down?")
                 players = -1
 
