@@ -371,7 +371,7 @@ async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context
         if mc is None:
             await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
-            await log(ctx, "Cleaned up! Removed", ip, "querier, deleted data from", ctx.guild.name + ",", ("but failed to remove my status channels. ", "and removed my status channels.")[deleted])
+            await log(ctx, "Cleaned up! Removed", ip, "querier, deleted", ctx.guild.name + "'s data from my server,", ("but failed to remove my status channels. ", "and removed my status channels.")[deleted])
 
 
 async def safeSend(msg: str, ctx: Union[discord.ext.commands.context.Context, None] = None,
