@@ -416,7 +416,7 @@ async def status_task(sid: int):
             try:
                 oldNames = getMCNames(sid, cursor)
                 players, max, names, _ = await getStatus(mc)
-                lastTime = getMCQueryTime(sid, cursor)
+                lastTime = getMCQueryTime(sid, cursor).replace(tzinfo=timezone.utc)
 
                 currTime = datetime.utcnow().replace(tzinfo=timezone.utc)
                 if lastTime is None:
