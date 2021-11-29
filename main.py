@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import socket
 from datetime import datetime
 from typing import Union, List
 import mysql.connector
@@ -90,7 +91,7 @@ class Admin(commands.Cog):
             names = query.players.names
         except asyncio.exceptions.TimeoutError:
             await log(ctx, "Setup query error, server lagging?")
-        except ConnectionRefusedError:
+        except (ConnectionRefusedError, socket.gaierror):
             await log(ctx, "Setup query failed, server down?")
         else:
             mydb, cursor = connect()
@@ -445,7 +446,7 @@ async def status_task(sid: int):
                 print(currServ.name, "Timeout, server lagging?")
                 players = -1
 
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, socket.gaierror):
                 print(currServ.name, "Cannot connect to server, down?")
                 players = -1
 
