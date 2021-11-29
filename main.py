@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Union, List
 import mysql.connector
 
@@ -418,10 +418,10 @@ async def status_task(sid: int):
                 players, max, names, _ = await getStatus(mc)
                 lastTime = getMCQueryTime(sid, cursor)
 
-                currTime = datetime.now()
+                currTime = datetime.utcnow().replace(tzinfo=timezone.utc)
                 if lastTime is None:
                     lastTime = currTime
-                print(currServ.name, "Query:", ip, str(players) + "/" + str(max), datetime.now().strftime("%H:%M:%S"),
+                print(currServ.name, "Query:", ip, str(players) + "/" + str(max), datetime.utcnow().replace(tzinfo=timezone.utc).strftime("%H:%M:%S"),
                       str(currTime - lastTime))
 
                 setMCNames(sid, cursor, names)
