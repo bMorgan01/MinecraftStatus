@@ -104,6 +104,8 @@ class Admin(commands.Cog):
 
             setMCNames(ctx.guild.id, cursor, names)
 
+            cursor.execute(f"INSERT INTO times (id) VALUES({ctx.guild.id}) ON DUPLICATE KEY UPDATE id=id;")
+
             mydb.commit()
             mydb.close()
 
@@ -134,6 +136,16 @@ class Admin(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def noannounce(self, ctx: discord.ext.commands.context.Context):
         await setAnn(ctx, False)
+
+    @commands.command(brief="Turns on total player hour display", description="Turns on total player hour display.")
+    @commands.has_permissions(administrator=True)
+    async def showhours(self, ctx: discord.ext.commands.context.Context):
+        await setHours(ctx, True)
+
+    @commands.command(brief="Turns off total player hour display", description="Turns off total player hour display.")
+    @commands.has_permissions(administrator=True)
+    async def nohours(self, ctx: discord.ext.commands.context.Context):
+        await setHours(ctx, False)
 
     # @commands.command()
     # async def notif(ctx: discord.ext.commands.context.Context, kind: Union[str, None] = None):
@@ -169,13 +181,23 @@ class Other(commands.Cog):
         mydb, cursor = connect()
         ip, port = getMCIP(ctx.guild.id, cursor)
         mc = MinecraftServer(ip, port)
-        mydb.close()
+        
 
         if mc is None:
             await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
-            players, max, names, motd = await getStatus(mc)
-            await safeSend("Status:\n" + ip + "\n" + motd + "\n\nPlayers: " + str(players) + "/" + str(max), ctx=ctx)
+            players, max, _, motd = await getStatus(mc)
+
+            seconds = getPersonSeconds(ctx.guild.id, cursor)
+            seconds = seconds % (24 * 3600)
+            hour = seconds // 3600
+            seconds %= 3600
+            minutes = seconds // 60
+            seconds %= 60
+
+            await safeSend("Status:\n  " + ip + "\n  " + motd + "\n\n  Players: " + str(players) + "/" + str(max) + "\n  Total Player Time: " + "%d:%02d:%02d" % (hour, minutes, seconds), ctx=ctx, format="```")
+            
+        mydb.close()
 
     @commands.command(brief="Lists online players", description="Lists online players.")
     async def players(self, ctx: discord.ext.commands.context.Context):
@@ -191,10 +213,10 @@ class Other(commands.Cog):
 
             pStr = "Online Players:\n"
             for name in names:
-                pStr += name + "\n"
+                pStr += "  " + name + "\n"
 
             pStr = pStr[:-1]
-            await safeSend(pStr, ctx=ctx)
+            await safeSend(pStr, ctx=ctx, format="```")
 
     @commands.command(brief="Shows last query time", description="Shows last query time. Useful for debugging server connection issues.")
     async def lastquery(self, ctx: discord.ext.commands.context.Context):
@@ -230,6 +252,20 @@ async def setAnn(ctx: discord.ext.commands.context.Context, ann: bool, cid: Unio
         "Announcing when a player joins " + ip + " in <#" + str(cid) + ">.")[
         ann])
 
+async def setHours(ctx: discord.ext.commands.context.Context, hours: bool):
+    mydb, cursor = connect()
+    ip, _ = getMCIP(ctx.guild.id, cursor)
+
+    cursor.execute(
+        f"UPDATE servers SET hours={str((0, 1)[hours])} WHERE id={str(ctx.guild.id)}")
+
+    mydb.commit()
+    mydb.close()
+
+    await log(ctx, (
+        "Not displaying total player hours for " + ip + ".",
+        "Displaying total player hours for " + ip + ".")[
+        hours])
 
 async def log(ctx: discord.ext.commands.context.Context, *prt: str):
     print(ctx.guild.name, "Logging:", " ".join(list(prt)))
@@ -313,6 +349,17 @@ def getMCQueryTime(sid: int, cursor: mysql.connector.connection_cext.CMySQLConne
 
     return tstr
 
+def getPersonSeconds(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection):
+    cursor.execute("SELECT time FROM times WHERE id=" + str(sid))
+    tstr = cursor.fetchone()[0]
+
+    return int(tstr)
+
+def getShowHours(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection):
+    cursor.execute("SELECT hours FROM servers WHERE id=" + str(sid))
+    tstr = cursor.fetchone()[0]
+
+    return bool(tstr)
 
 def getMCJoinAnnounce(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection):
     cursor.execute("SELECT announce_joins, announce_joins_id FROM servers WHERE id=" + str(sid))
@@ -339,6 +386,8 @@ def setMCNames(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnectio
 def setMCQueryTime(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection, dt: datetime):
     cursor.execute("UPDATE servers SET last_query=\"" + dt.strftime('%Y-%m-%d %H:%M:%S') + "\" WHERE id=" + str(sid))
 
+def incrementPersonSeconds(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection, seconds: int):
+    cursor.execute(f"UPDATE times SET time=time+{seconds} WHERE id={str(sid)};")
 
 async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context, None] = None):
     if sid in servers:
@@ -364,6 +413,7 @@ async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context
 
     cursor.execute("DELETE FROM servers WHERE id=" + str(sid))
     cursor.execute("DELETE FROM names WHERE id=" + str(sid))
+    cursor.execute("DELETE FROM times WHERE id=" + str(sid))
 
     mydb.commit()
     mydb.close()
@@ -378,12 +428,12 @@ async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context
 
 
 async def safeSend(msg: str, ctx: Union[discord.ext.commands.context.Context, None] = None,
-                   chan: Union[discord.TextChannel, None] = None):
+                   chan: Union[discord.TextChannel, None] = None, format: str = ''):
     try:
         if ctx is not None:
-            await ctx.send(msg)
+            await ctx.send(f"{format}{msg}{format}")
         elif chan is not None:
-            await chan.send(msg)
+            await chan.send(f"{format}{msg}{format}")
     except discord.errors.Forbidden:
         if ctx is not None:
             print(ctx.guild.name,
@@ -394,6 +444,8 @@ async def safeSend(msg: str, ctx: Union[discord.ext.commands.context.Context, No
 
 
 async def status_task(sid: int):
+    first_iter = True
+
     while True:
         # if bot is not a member, clean data, end task
         if get_server_by_id(sid) is None:
@@ -417,6 +469,7 @@ async def status_task(sid: int):
                 oldNames = getMCNames(sid, cursor)
                 players, max, names, _ = await getStatus(mc)
                 lastTime = getMCQueryTime(sid, cursor).replace(tzinfo=timezone.utc)
+                lastSeconds = getPersonSeconds(sid, cursor)
 
                 currTime = datetime.utcnow().replace(tzinfo=timezone.utc)
                 if lastTime is None:
@@ -426,6 +479,8 @@ async def status_task(sid: int):
 
                 setMCNames(sid, cursor, names)
                 setMCQueryTime(sid, cursor, currTime)
+                if not first_iter:
+                    incrementPersonSeconds(sid, cursor, len(names) * (currTime - lastTime).total_seconds())
 
                 announceJoin, annChanId = getMCJoinAnnounce(sid, cursor)
                 annRole = None
@@ -454,6 +509,8 @@ async def status_task(sid: int):
 
             iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=ChannelType.voice)
             pChannels = find_channels(serv=currServ, channame="Players: ", channamesearch="in",
+                                      chantype=ChannelType.voice)
+            tChannels = find_channels(serv=currServ, channame="Player Hrs: ", channamesearch="in",
                                       chantype=ChannelType.voice)
 
             overwrites = {
@@ -500,10 +557,30 @@ async def status_task(sid: int):
                 await currServ.create_voice_channel("Players: " + str(players) + "/" + str(max),
                                                     overwrites=overwrites)
 
+            if getShowHours(sid, cursor) and not first_iter:
+                tStr = "Player Hrs: " + str(round((lastSeconds + len(names) * (currTime - lastTime).total_seconds())/3600))
+                if len(tChannels) > 0:
+                    lastTName = tChannels[0].name
+
+                    if lastTName != tStr:
+                        try:
+                            print(currServ.name, "Update: Time changed!")
+                            await tChannels[0].edit(name=tStr)
+                            wait = 301
+                        except discord.errors.Forbidden:
+                            print(currServ.name,
+                                "Error: I don't have permission to edit channels. Try deleting the channels I create. Then, run the `setup` command again.")
+                            await doBotCleanup(sid)
+                            return
+                else:
+                    await currServ.create_voice_channel(tStr,
+                                                        overwrites=overwrites)
+
         mydb.commit()
         mydb.close()
 
         await asyncio.sleep(wait)
+        first_iter = False
 
 
 load_dotenv('.env')
