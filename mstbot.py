@@ -502,10 +502,12 @@ async def status_task(sid: int):
             except asyncio.exceptions.TimeoutError:
                 print(currServ.name, "Timeout, server lagging?")
                 players = -1
+                lastSeconds = -1
 
             except (ConnectionRefusedError, socket.gaierror):
                 print(currServ.name, "Cannot connect to server, down?")
                 players = -1
+                lastSeconds = -1
 
             iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=ChannelType.voice)
             pChannels = find_channels(serv=currServ, channame="Players: ", channamesearch="in",
@@ -557,7 +559,7 @@ async def status_task(sid: int):
                 await currServ.create_voice_channel("Players: " + str(players) + "/" + str(max),
                                                     overwrites=overwrites)
 
-            if getShowHours(sid, cursor) and not first_iter and lastSeconds is not None:
+            if getShowHours(sid, cursor) and not first_iter and lastSeconds != -1:
                 tStr = "Player Hrs: " + str(round((lastSeconds + len(names) * (currTime - lastTime).total_seconds())/3600))
                 if len(tChannels) > 0:
                     lastTName = tChannels[0].name
