@@ -153,7 +153,7 @@ class Admin(commands.Cog):
     #         await safeSend(ctx, "The notification options are: \n1. joins")
     #     else:
     #         name = ""
-    #         if kind.lower() == "joins":
+    #         if kind.lower() ==  "joins":
     #             name = "Status Joins"
     #
     #         if name != "":
@@ -557,7 +557,7 @@ async def status_task(sid: int):
                 await currServ.create_voice_channel("Players: " + str(players) + "/" + str(max),
                                                     overwrites=overwrites)
 
-            if getShowHours(sid, cursor) and not first_iter:
+            if getShowHours(sid, cursor) and not first_iter and lastSeconds is not None:
                 tStr = "Player Hrs: " + str(round((lastSeconds + len(names) * (currTime - lastTime).total_seconds())/3600))
                 if len(tChannels) > 0:
                     lastTName = tChannels[0].name
