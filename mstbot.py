@@ -4,50 +4,53 @@ import re
 import socket
 from datetime import datetime, timezone
 from typing import Union, List
+
 import mysql.connector
-
 import discord
-from discord import ChannelType
 from discord.ext import commands
-
 from dotenv import load_dotenv
-from mcstatus import MinecraftServer
+from mcstatus import JavaServer
 
+# Load environment variables
+load_dotenv('.env')
+
+# Bot Initialization
 bot = commands.Bot(command_prefix='$')
 servers = []
 
-
 @bot.event
 async def on_ready():
-    print('We have logged in as {0.user}'.format(bot))
-
+    print(f'Logged in as {bot.user}')
     mydb, cursor = connect()
+    
     cursor.execute("SELECT id, ip, announce_joins, announce_joins_id FROM servers")
     rows = cursor.fetchall()
 
     for row in rows:
         if get_server_by_id(row[0]) is None:
-            print("Kicked: Bot must've been kicked from", row[0], ". Cleaning up.")
-            await doBotCleanup(row[0])
+            print(f"Kicked: Bot was removed from {row[0]}. Cleaning up.")
+            await do_bot_cleanup(row[0])
             continue
 
         bot.loop.create_task(status_task(row[0]))
         servers.append(row[0])
-        print("Now querying", get_server_by_id(row[0]).name)
-        print((
-                  "Not announcing when a player joins " + row[1] + ".",
-                  "Announcing when a player joins " + row[1] + " in <#" + str(row[3]) + ">.")[
-                  row[2]])
+        announcement_status = "Not announcing" if not row[2] else f"Announcing in <#{row[3]}>"
+        print(f"Now querying {get_server_by_id(row[0]).name}. {announcement_status} for {row[1]}")
 
 
 @bot.event
-async def on_command_error(ctx: discord.ext.commands.context.Context, error: discord.ext.commands.CommandError):
-    if isinstance(error, discord.ext.commands.CommandNotFound):
-        await safeSend("Command \"" + ctx.message.content.split()[0] + "\" does not exist.", ctx=ctx)
-    elif isinstance(error, discord.ext.commands.MissingPermissions):
-        await safeSend("You are missing " + ", ".join(error.missing_perms) + " permission(s) to run this command.", ctx=ctx)
-    elif isinstance(error, discord.ext.commands.CommandInvokeError) and error.original.__class__.__name__ == "gaierror":
-        await log(ctx, "Could not connect, server down?")
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    command = ctx.message.content.split()[0][1:]  # Extract command name
+    prefix = ctx.prefix
+
+    if isinstance(error, commands.CommandNotFound):
+        await safe_send(ctx, f'Command "{command}" does not exist. Use `{ctx.prefix}help` for available commands.')
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await log(ctx, f'Command "{command}" is missing required arguments. Use `{ctx.prefix}help {command}` for details.')
+    elif isinstance(error, commands.MissingPermissions):
+        await safe_send(ctx, f'You lack permissions: {", ".join(error.missing_perms)}.')
+    elif isinstance(error, commands.CommandInvokeError) and isinstance(error.original, socket.gaierror):
+        await log(ctx, "Could not connect, is the server down?")
     else:
         raise error
 
@@ -58,49 +61,25 @@ class Admin(commands.Cog):
     @commands.command(brief="Sets up new Minecraft server querier",
                       description="Sets up new Minecraft server querier. Removes previous querier, if applicable. Use a valid domain name or IP address. The default port (25565) is used unless otherwise specified. Specify a channel ID to announce player joins there.")
     @commands.has_permissions(administrator=True)
-    async def setup(self, ctx: discord.ext.commands.context.Context, newip: str, port: int = 25565, annChanID: Union[int, None] = None):
-        split = newip.split(":")
-        if len(split) > 1:
-            newip = split[0]
-            try:
-                port = int(split[1])
-            except ValueError:
-                await log(ctx, str(port), "is not a valid port number, please try again.")
-                return
-
-        if port not in range(65536):
-            await log(ctx, str(port), "is not a valid port number, please try again.")
+    async def setup(self, ctx: discord.ext.commands.context.Context, ip: str, port: int = 25565, annChanID: Union[int, None] = None):
+        """Sets up a new Minecraft server querier."""
+        val_ip, val_port = await validate_ip_port(ctx, ip, port)
+        if not val_ip:
             return
 
-        domain = re.search("^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,6}$", newip)
-        addr = re.search(
-            "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$",
-            newip)
-        if domain is None or domain.group(0) != newip:
-            if addr is None or addr.group(0) != newip:
-                await log(ctx, newip, "is not a valid domain or IP address, please try again.")
-                return
-
-        if re.search("(^127\.)|(^10\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^192\.168\.)",
-                     newip) is not None:
-            await log(ctx, newip, "is a private IP. I won't be able to query it.")
-            return
-
-        mc = MinecraftServer(newip, port)
+        mc = JavaServer.lookup(f"{val_ip}:{val_port}")
 
         try:
-            query = await asyncio.wait_for(mc.async_query(), timeout=1.0)
+            query = mc.query()
             names = query.players.names
         except asyncio.exceptions.TimeoutError:
-            await log(ctx, "Setup query error, server lagging?")
+            await log(ctx, "Setup query error, query port enabled?")
         except ConnectionRefusedError:
             await log(ctx, "Setup query failed, server down?")
         else:
             mydb, cursor = connect()
 
-            cursor.execute(
-                "INSERT INTO servers (id, ip, port) VALUES(" + str(ctx.guild.id) + ", \"" + newip + "\", " + str(
-                    port) + ") ON DUPLICATE KEY UPDATE ip=\"" + newip + "\", port=" + str(port))
+            cursor.execute(f"INSERT INTO servers (id, ip, port) VALUES({str(ctx.guild.id)}, \"{val_ip}\", {str(port)}) ON DUPLICATE KEY UPDATE ip=\"{val_ip}\", port={str(port)}")
 
             setMCNames(ctx.guild.id, cursor, names)
 
@@ -118,13 +97,13 @@ class Admin(commands.Cog):
                 bot.loop.create_task(status_task(ctx.guild.id))
                 servers.append(ctx.guild.id)
 
-            await log(ctx, "Setup new server query with IP: " + newip)
+            await log(ctx, f"Setup new server query with IP: {val_ip}")
 
     @commands.command(brief="Removes querier and status channels",
                       description="Removes querier and status channels. Deletes your guild's data from my server. Data deletion occurs automatically when I am removed from your guild.")
     @commands.has_permissions(administrator=True)
     async def cleanup(self, ctx: discord.ext.commands.context.Context):
-        await doBotCleanup(ctx.guild.id, ctx=ctx)
+        await do_bot_cleanup(ctx.guild.id, ctx=ctx)
 
     @commands.command(brief="Turns on player join announcements",
                       description="Turns on player join announcements in specified channel.")
@@ -150,7 +129,7 @@ class Admin(commands.Cog):
     # @commands.command()
     # async def notif(ctx: discord.ext.commands.context.Context, kind: Union[str, None] = None):
     #     if kind is None:
-    #         await safeSend(ctx, "The notification options are: \n1. joins")
+    #         await safe_send(ctx, "The notification options are: \n1. joins")
     #     else:
     #         name = ""
     #         if kind.lower() ==  "joins":
@@ -180,11 +159,11 @@ class Other(commands.Cog):
     async def status(self, ctx: discord.ext.commands.context.Context):
         mydb, cursor = connect()
         ip, port = getMCIP(ctx.guild.id, cursor)
-        mc = MinecraftServer(ip, port)
+        mc = JavaServer(ip, port)
         
 
         if mc is None:
-            await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
+            await safe_send("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
             players, max, _, motd = await getStatus(mc)
 
@@ -195,7 +174,7 @@ class Other(commands.Cog):
             minutes = seconds // 60
             seconds %= 60
 
-            await safeSend("Status:\n  " + ip + "\n  " + motd + "\n\n  Players: " + str(players) + "/" + str(max) + "\n  Total Player Time: " + "%d:%02d:%02d" % (hour, minutes, seconds), ctx=ctx, format="```")
+            await safe_send("Status:\n  " + ip + "\n  " + motd + "\n\n  Players: " + str(players) + "/" + str(max) + "\n  Total Player Time: " + "%d:%02d:%02d" % (hour, minutes, seconds), ctx=ctx, format="```")
             
         mydb.close()
 
@@ -203,11 +182,11 @@ class Other(commands.Cog):
     async def players(self, ctx: discord.ext.commands.context.Context):
         mydb, cursor = connect()
         ip, port = getMCIP(ctx.guild.id, cursor)
-        mc = MinecraftServer(ip, port)
+        mc = JavaServer(ip, port)
         mydb.close()
 
         if mc is None:
-            await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
+            await safe_send("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
             _, _, names, _ = await getStatus(mc)
 
@@ -216,20 +195,20 @@ class Other(commands.Cog):
                 pStr += "  " + name + "\n"
 
             pStr = pStr[:-1]
-            await safeSend(pStr, ctx=ctx, format="```")
+            await safe_send(pStr, ctx=ctx, format="```")
 
     @commands.command(brief="Shows last query time", description="Shows last query time. Useful for debugging server connection issues.")
     async def lastquery(self, ctx: discord.ext.commands.context.Context):
         mydb, cursor = connect()
         ip, port = getMCIP(ctx.guild.id, cursor)
-        mc = MinecraftServer(ip, port)
+        mc = JavaServer(ip, port)
         last = getMCQueryTime(ctx.guild.id, cursor)
         mydb.close()
 
         if mc is None:
-            await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
+            await safe_send("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
-            await safeSend("I last queried " + ip + " at " + str(last) + " UTC", ctx=ctx)
+            await safe_send("I last queried " + ip + " at " + str(last) + " UTC", ctx=ctx)
 
 
 async def setAnn(ctx: discord.ext.commands.context.Context, ann: bool, cid: Union[int, None] = None):
@@ -252,6 +231,7 @@ async def setAnn(ctx: discord.ext.commands.context.Context, ann: bool, cid: Unio
         "Announcing when a player joins " + ip + " in <#" + str(cid) + ">.")[
         ann])
 
+
 async def setHours(ctx: discord.ext.commands.context.Context, hours: bool):
     mydb, cursor = connect()
     ip, _ = getMCIP(ctx.guild.id, cursor)
@@ -267,10 +247,44 @@ async def setHours(ctx: discord.ext.commands.context.Context, hours: bool):
         "Displaying total player hours for " + ip + ".")[
         hours])
 
-async def log(ctx: discord.ext.commands.context.Context, *prt: str):
-    print(ctx.guild.name, "Logging:", " ".join(list(prt)))
-    await safeSend(" ".join(list(prt)), ctx=ctx)
 
+async def log(ctx: commands.Context, *msg: str):
+    """Log messages both in Discord and console."""
+    print(ctx.guild.name, "Log:", " ".join(msg))
+    await safe_send(" ".join(msg), ctx=ctx)
+
+
+async def validate_ip_port(ctx, ip, port):
+    """Validates IP and Port"""
+    split = ip.split(":")
+    if len(split) > 1:
+        ip = split[0]
+
+        try:
+            port = int(split[1])
+        except ValueError:
+            await log(ctx, str(port), "is not a valid port number, please try again.")
+            return None, None
+
+    if port not in range(65536):
+        await log(ctx, str(port), "is not a valid port number, please try again.")
+        return None, None
+
+    domain = re.search("^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,6}$", ip)
+    addr = re.search(
+        "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$",
+        ip)
+    if domain is None or domain.group(0) != ip:
+        if addr is None or addr.group(0) != ip:
+            await log(ctx, ip, "is not a valid domain or IP address, please try again.")
+            return None, None
+
+    if re.search("(^127\.)|(^10\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^192\.168\.)",
+                    ip) is not None:
+        await log(ctx, ip, "is a private IP. I won't be able to query it.")
+        return None, None
+    
+    return ip, port
 
 def get_server_by_id(sid: int):
     for server in bot.guilds:
@@ -305,7 +319,7 @@ def find_channels(serv: Union[discord.Guild, None] = None, sid: Union[int, None]
     return matches
 
 
-async def getStatus(serv: MinecraftServer):
+async def getStatus(serv: JavaServer):
     status = await asyncio.wait_for(serv.async_query(), timeout=1.0)
     p = status.players.online
     m = status.players.max
@@ -389,27 +403,28 @@ def setMCQueryTime(sid: int, cursor: mysql.connector.connection_cext.CMySQLConne
 def incrementPersonSeconds(sid: int, cursor: mysql.connector.connection_cext.CMySQLConnection, seconds: int):
     cursor.execute(f"UPDATE times SET time=time+{seconds} WHERE id={str(sid)};")
 
-async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context, None] = None):
+async def do_bot_cleanup(sid: int, ctx: Union[discord.ext.commands.context.Context, None] = None):
     if sid in servers:
         servers.remove(sid)
 
     deleted = False
     currServ = get_server_by_id(sid)
     if currServ is not None:
-        iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=ChannelType.voice)
-        pChannels = find_channels(serv=currServ, channame="Players: ", channamesearch="in",
-                                  chantype=ChannelType.voice)
-
+        iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=discord.ChannelType.voice)
+        pChannels = find_channels(serv=currServ, channame="Players: ", channamesearch="in", chantype=discord.ChannelType.voice)
+        hChannels = find_channels(serv=currServ, channame="Player Hrs: ", channamesearch="in", chantype=discord.ChannelType.voice)
+        channels = iChannels + pChannels + hChannels
         try:
-            await iChannels[0].delete()
-            await pChannels[0].delete()
+            for channel in channels:
+                await channel.delete()
+
             deleted = True
         except discord.errors.Forbidden:
             print(currServ.name, "Error: I don't have permission to delete channels.")
 
     mydb, cursor = connect()
     ip, port = getMCIP(sid, cursor)
-    mc = MinecraftServer(ip, port)
+    mc = JavaServer(ip, port)
 
     cursor.execute("DELETE FROM servers WHERE id=" + str(sid))
     cursor.execute("DELETE FROM names WHERE id=" + str(sid))
@@ -422,12 +437,12 @@ async def doBotCleanup(sid: int, ctx: Union[discord.ext.commands.context.Context
         print("Cleaned up", sid, ".")
     else:
         if mc is None:
-            await safeSend("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
+            await safe_send("There is no server query set up. Run the `setup` command to get started.", ctx=ctx)
         else:
             await log(ctx, "Cleaned up! Removed", ip, "querier, deleted", ctx.guild.name + "'s data from my server,", ("but failed to remove my status channels. ", "and removed my status channels.")[deleted])
 
 
-async def safeSend(msg: str, ctx: Union[discord.ext.commands.context.Context, None] = None,
+async def safe_send(msg: str, ctx: Union[discord.ext.commands.context.Context, None] = None,
                    chan: Union[discord.TextChannel, None] = None, format: str = ''):
     try:
         if ctx is not None:
@@ -450,7 +465,7 @@ async def status_task(sid: int):
         # if bot is not a member, clean data, end task
         if get_server_by_id(sid) is None:
             print("Kicked: Bot must've been kicked from", sid, ". Cleaning up.")
-            await doBotCleanup(sid)
+            await do_bot_cleanup(sid)
             return
 
         # check to see if specified server is still querying
@@ -460,7 +475,7 @@ async def status_task(sid: int):
 
         mydb, cursor = connect()
         ip, port = getMCIP(sid, cursor)
-        mc = MinecraftServer(ip, port)
+        mc = JavaServer(ip, port)
         currServ = get_server_by_id(sid)
         wait = 10
 
@@ -468,13 +483,16 @@ async def status_task(sid: int):
             try:
                 oldNames = getMCNames(sid, cursor)
                 players, max, names, _ = await getStatus(mc)
-                lastTime = getMCQueryTime(sid, cursor).replace(tzinfo=timezone.utc)
+                lastTime = getMCQueryTime(sid, cursor)
                 lastSeconds = getPersonSeconds(sid, cursor)
 
-                currTime = datetime.utcnow().replace(tzinfo=timezone.utc)
+                currTime = datetime.now(timezone.utc)
                 if lastTime is None:
                     lastTime = currTime
-                print(currServ.name, "Query:", ip, str(players) + "/" + str(max), datetime.utcnow().replace(tzinfo=timezone.utc).strftime("%H:%M:%S"),
+                else:
+                    lastTime = lastTime.replace(tzinfo=timezone.utc)
+                    
+                print(currServ.name, "Query:", ip, str(players) + "/" + str(max), datetime.now(timezone.utc).strftime("%H:%M:%S"),
                       str(currTime - lastTime))
 
                 setMCNames(sid, cursor, names)
@@ -492,9 +510,9 @@ async def status_task(sid: int):
 
                         if len(aChannels) > 0:
                             if annRole is None:
-                                await safeSend(name + " joined the game!", chan=aChannels[0])
+                                await safe_send(name + " joined the game!", chan=aChannels[0])
                             else:
-                                await safeSend("<@&" + str(annRole.id) + "> " + name + " joined the game!",
+                                await safe_send("<@&" + str(annRole.id) + "> " + name + " joined the game!",
                                                chan=aChannels[0])
 
                             print(currServ.name, "Announced player(s) join.")
@@ -509,11 +527,11 @@ async def status_task(sid: int):
                 players = -1
                 lastSeconds = -1
 
-            iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=ChannelType.voice)
+            iChannels = find_channels(serv=currServ, channame="IP: ", channamesearch="in", chantype=discord.ChannelType.voice)
             pChannels = find_channels(serv=currServ, channame="Players: ", channamesearch="in",
-                                      chantype=ChannelType.voice)
+                                      chantype=discord.ChannelType.voice)
             tChannels = find_channels(serv=currServ, channame="Player Hrs: ", channamesearch="in",
-                                      chantype=ChannelType.voice)
+                                      chantype=discord.ChannelType.voice)
 
             overwrites = {
                 currServ.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
@@ -532,7 +550,7 @@ async def status_task(sid: int):
                     except discord.errors.Forbidden:
                         print(currServ.name,
                               "Error: I don't have permission to edit channels. Try deleting the channels I create. Then, run the `setup` command again.")
-                        await doBotCleanup(sid)
+                        await do_bot_cleanup(sid)
                         return
             else:
                 await currServ.create_voice_channel("IP: " + ip, overwrites=overwrites)
@@ -553,10 +571,10 @@ async def status_task(sid: int):
                     except discord.errors.Forbidden:
                         print(currServ.name,
                               "Error: I don't have permission to edit channels. Try deleting the channels I create. Then, run the `setup` command again.")
-                        await doBotCleanup(sid)
+                        await do_bot_cleanup(sid)
                         return
             else:
-                await currServ.create_voice_channel("Players: " + str(players) + "/" + str(max),
+                await currServ.create_voice_channel(f"Players: {str(players)}/{str(max)}",
                                                     overwrites=overwrites)
 
             if getShowHours(sid, cursor) and not first_iter and lastSeconds != -1:
@@ -572,7 +590,7 @@ async def status_task(sid: int):
                         except discord.errors.Forbidden:
                             print(currServ.name,
                                 "Error: I don't have permission to edit channels. Try deleting the channels I create. Then, run the `setup` command again.")
-                            await doBotCleanup(sid)
+                            await do_bot_cleanup(sid)
                             return
                 else:
                     await currServ.create_voice_channel(tStr,
@@ -584,8 +602,6 @@ async def status_task(sid: int):
         await asyncio.sleep(wait)
         first_iter = False
 
-
-load_dotenv('.env')
 bot.add_cog(Admin())
 bot.add_cog(Other(bot))
 bot.run(os.getenv('TOKEN'))
